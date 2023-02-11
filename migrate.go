@@ -47,13 +47,13 @@ func New(ctx context.Context, dsn string, migrations *Migrations) (*Database, er
 		return nil, err
 	}
 
-	return NewWithConn(ctx, conn, migrations)
+	return NewWithConn(ctx, conn, migrations), nil
 }
 
 // NewWithConn creates a new database instance with a connection and migrations.
-func NewWithConn(ctx context.Context, conn *pgx.Conn, migrations *Migrations) (*Database, error) {
+func NewWithConn(ctx context.Context, conn *pgx.Conn, migrations *Migrations) *Database {
 	db := &Database{conn: conn, migrationTable: "migrations", migrations: migrations}
-	return db, nil
+	return db
 }
 
 // SetMigrationTable sets the name of the migration table.
