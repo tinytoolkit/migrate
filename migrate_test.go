@@ -1,9 +1,13 @@
-package migrate
+package migrate_test
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/tinytoolkit/migrate"
+)
 
 func TestMigrationSorting(t *testing.T) {
-	migrations := Migrations{
+	migrations := migrate.Migrations{
 		{Version: 1, Description: "first migration"},
 		{Version: 4, Description: "fourth migration"},
 		{Version: 3, Description: "third migration"},
