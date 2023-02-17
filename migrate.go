@@ -180,7 +180,7 @@ func (db *Database) MigrationIndex(ctx context.Context) ([]uint, error) {
 	}
 	defer rows.Close()
 
-	var index []uint
+	index := make([]uint, 0)
 	for rows.Next() {
 		var version uint
 		if err := rows.Scan(&version); err != nil {
@@ -189,6 +189,26 @@ func (db *Database) MigrationIndex(ctx context.Context) ([]uint, error) {
 		index = append(index, version)
 	}
 	return index, nil
+}
+
+// CurrentVersion returns the current version of the database.
+func (db *Database) CurrentVersion(ctx context.Context) (uint, error) {
+	query := fmt.Sprintf("SELECT version FROM %s ORDER BY version DESC LIMIT 1;", db.migrationTable)
+
+	rows, err := db.conn.Query(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+
+	if !rows.Next() {
+		return 0, nil
+	}
+
+	version := uint(0)
+	if err := rows.Scan(&version); err != nil {
+		return 0, err
+	}
+	return version, nil
 }
 
 // InsertMigration inserts a migration into the migration table.
