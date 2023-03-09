@@ -2,11 +2,11 @@ package migrate
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"sort"
 
-	"github.com/jackc/pgx/v5"
 	"golang.org/x/exp/slices"
 )
 
@@ -14,15 +14,15 @@ import (
 type Migration struct {
 	Version     uint
 	Description string
-	Up          func(tx pgx.Tx) error
-	Down        func(tx pgx.Tx) error
+	Up          func(tx *sql.Tx) error
+	Down        func(tx *sql.Tx) error
 }
 
 // Migrations is a slice of Migration.
 type Migrations []Migration
 
 // Sorted returns a sorted slice of migrations based on their versions.
-func (ms *Migrations) Sorted() []Migration {
+func (ms *Migrations) sorted() []Migration {
 	sortedMigrations := make([]Migration, len(*ms))
 	copy(sortedMigrations, *ms)
 
@@ -34,23 +34,25 @@ func (ms *Migrations) Sorted() []Migration {
 
 // Database represents a database connection and migration data.
 type Database struct {
-	conn           *pgx.Conn
+	driver         string
+	conn           *sql.DB
 	migrationTable string
 	migrations     *Migrations
 }
 
 // New creates a new database instance with a DSN string and migrations.
-func New(ctx context.Context, dsn string, migrations *Migrations) (*Database, error) {
-	conn, err := pgx.Connect(ctx, dsn)
+func New(driver, dsn string, migrations *Migrations) (*Database, error) {
+	conn, err := sql.Open(driver, dsn)
 	if err != nil {
 		return nil, err
 	}
-	return NewWithConn(ctx, conn, migrations), nil
-}
 
-// NewWithConn creates a new database instance with a connection and migrations.
-func NewWithConn(ctx context.Context, conn *pgx.Conn, migrations *Migrations) *Database {
-	return &Database{conn: conn, migrationTable: "migrations", migrations: migrations}
+	return &Database{
+		driver:         driver,
+		conn:           conn,
+		migrationTable: "migrations",
+		migrations:     migrations,
+	}, nil
 }
 
 // SetMigrationTable sets the name of the migration table.
@@ -61,23 +63,23 @@ func (db *Database) SetMigrationTable(table string) *Database {
 
 // MigrateUp migrates the database up to the current version (highest version).
 func (db *Database) MigrateUp(ctx context.Context) error {
-	tx, err := db.conn.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := db.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback()
 
-	err = db.MigrationTable(ctx)
-	if err != nil {
-		return err
-	}
-
-	index, err := db.MigrationIndex(ctx)
+	err = db.createMigrationTable(ctx, tx)
 	if err != nil {
 		return err
 	}
 
-	for _, migration := range db.migrations.Sorted() {
+	index, err := db.getMigrationIndex(ctx, tx)
+	if err != nil {
+		return err
+	}
+
+	for _, migration := range db.migrations.sorted() {
 		if migration.Version == 0 || migration.Description == "" {
 			return fmt.Errorf("invalid migration: version and description must be set")
 		}
@@ -95,29 +97,29 @@ func (db *Database) MigrateUp(ctx context.Context) error {
 			return err
 		}
 
-		if err := db.InsertMigration(ctx, migration.Version, migration.Description); err != nil {
+		if err := db.insertMigration(ctx, tx, migration.Version, migration.Description); err != nil {
 			return err
 		}
 
 		log.Printf("migration up (version=%v, description=%s)", migration.Version, migration.Description)
 	}
-	return tx.Commit(ctx)
+	return tx.Commit()
 }
 
 // MigrateDown migrates the database down by the specified amount.
 func (db *Database) MigrateDown(ctx context.Context, amount int) error {
-	tx, err := db.conn.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := db.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback()
 
-	err = db.MigrationTable(ctx)
+	err = db.createMigrationTable(ctx, tx)
 	if err != nil {
 		return err
 	}
 
-	index, err := db.MigrationIndex(ctx)
+	index, err := db.getMigrationIndex(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -131,7 +133,7 @@ func (db *Database) MigrateDown(ctx context.Context, amount int) error {
 	}
 
 	for i := len(index) - 1; i >= len(index)-amount; i-- {
-		migration := db.migrations.Sorted()[index[i]-1]
+		migration := db.migrations.sorted()[index[i]-1]
 
 		if migration.Version == 0 || migration.Description == "" {
 			return fmt.Errorf("invalid migration: version and description must be set")
@@ -149,32 +151,50 @@ func (db *Database) MigrateDown(ctx context.Context, amount int) error {
 			return err
 		}
 
-		if err := db.DeleteMigration(ctx, migration.Version); err != nil {
+		if err := db.deleteMigration(ctx, tx, migration.Version); err != nil {
 			return err
 		}
 
 		log.Printf("migration down (version=%v, description=%s)", migration.Version, migration.Description)
 	}
-	return tx.Commit(ctx)
+	return tx.Commit()
 }
 
-// MigrationTable creates the migration table if it doesn't exist.
-func (db *Database) MigrationTable(ctx context.Context) error {
-	_, err := db.conn.Exec(ctx, fmt.Sprintf(`
+// CurrentVersion returns the current version of the database.
+func (db *Database) CurrentVersion(ctx context.Context) (uint, error) {
+	query := fmt.Sprintf("SELECT version FROM %s ORDER BY version DESC LIMIT 1;", db.migrationTable)
+
+	rows, err := db.conn.QueryContext(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+
+	if !rows.Next() {
+		return 0, nil
+	}
+
+	version := uint(0)
+	if err := rows.Scan(&version); err != nil {
+		return 0, err
+	}
+	return version, nil
+}
+
+func (db *Database) createMigrationTable(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s (
-			id SERIAL PRIMARY KEY,
-			version INT UNIQUE NOT NULL,
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			version INTEGER UNIQUE NOT NULL,
 			description VARCHAR(255) UNIQUE NOT NULL
 		);
 	`, db.migrationTable))
 	return err
 }
 
-// MigrationIndex returns the migration index of the database.
-func (db *Database) MigrationIndex(ctx context.Context) ([]uint, error) {
+func (db *Database) getMigrationIndex(ctx context.Context, tx *sql.Tx) ([]uint, error) {
 	query := fmt.Sprintf("SELECT version FROM %s ORDER BY version ASC;", db.migrationTable)
 
-	rows, err := db.conn.Query(ctx, query)
+	rows, err := tx.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -191,36 +211,26 @@ func (db *Database) MigrationIndex(ctx context.Context) ([]uint, error) {
 	return index, nil
 }
 
-// CurrentVersion returns the current version of the database.
-func (db *Database) CurrentVersion(ctx context.Context) (uint, error) {
-	query := fmt.Sprintf("SELECT version FROM %s ORDER BY version DESC LIMIT 1;", db.migrationTable)
-
-	rows, err := db.conn.Query(ctx, query)
-	if err != nil {
-		return 0, err
+func (db *Database) insertMigration(ctx context.Context, tx *sql.Tx, version uint, description string) error {
+	var query string
+	switch db.driver {
+	case "postgres":
+		query = fmt.Sprintf("INSERT INTO %s (version, description) VALUES ($1, $2);", db.migrationTable)
+	default:
+		query = fmt.Sprintf("INSERT INTO %s (version, description) VALUES (?, ?);", db.migrationTable)
 	}
-
-	if !rows.Next() {
-		return 0, nil
-	}
-
-	version := uint(0)
-	if err := rows.Scan(&version); err != nil {
-		return 0, err
-	}
-	return version, nil
-}
-
-// InsertMigration inserts a migration into the migration table.
-func (db *Database) InsertMigration(ctx context.Context, version uint, description string) error {
-	query := fmt.Sprintf("INSERT INTO %s (version, description) VALUES ($1, $2);", db.migrationTable)
-	_, err := db.conn.Exec(ctx, query, version, description)
+	_, err := tx.ExecContext(ctx, query, version, description)
 	return err
 }
 
-// DeleteMigration deletes a migration from the migration table.
-func (db *Database) DeleteMigration(ctx context.Context, version uint) error {
-	query := fmt.Sprintf("DELETE FROM %s WHERE version = $1;", db.migrationTable)
-	_, err := db.conn.Exec(ctx, query, version)
+func (db *Database) deleteMigration(ctx context.Context, tx *sql.Tx, version uint) error {
+	var query string
+	switch db.driver {
+	case "postgres":
+		query = fmt.Sprintf("DELETE FROM %s WHERE version = $1;", db.migrationTable)
+	default:
+		query = fmt.Sprintf("DELETE FROM %s WHERE version = ?;", db.migrationTable)
+	}
+	_, err := tx.ExecContext(ctx, query, version)
 	return err
 }
