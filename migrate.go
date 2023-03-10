@@ -55,6 +55,20 @@ func New(dsn string, migrations *Migrations) (*Database, error) {
 	}, nil
 }
 
+// NewWithConn creates a new database instance with a database connection and migrations.
+func NewWithConn(conn *sql.DB, migrations *Migrations) *Database {
+	return &Database{
+		conn:           conn,
+		migrationTable: "migrations",
+		migrations:     migrations,
+	}
+}
+
+// Close closes the database connection.
+func (db *Database) Close() error {
+	return db.conn.Close()
+}
+
 // SetMigrationTable sets the name of the migration table.
 func (db *Database) SetMigrationTable(table string) *Database {
 	db.migrationTable = table
