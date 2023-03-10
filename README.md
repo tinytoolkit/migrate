@@ -1,6 +1,6 @@
 # tinytoolkit/migrate
 
-A simple SQL migration library for Go.
+A simple SQLite migration library for Go.
 
 ## Installation
 
@@ -19,8 +19,9 @@ import (
 	"fmt"
 	"log"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/tinytoolkit/migrate"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 func main() {

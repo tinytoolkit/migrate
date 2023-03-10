@@ -8,6 +8,8 @@ import (
 	"sort"
 
 	"golang.org/x/exp/slices"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // Migration represents a database migration with a version, description, up and down functions.
@@ -34,21 +36,19 @@ func (ms *Migrations) sorted() []Migration {
 
 // Database represents a database connection and migration data.
 type Database struct {
-	driver         string
 	conn           *sql.DB
 	migrationTable string
 	migrations     *Migrations
 }
 
 // New creates a new database instance with a DSN string and migrations.
-func New(driver, dsn string, migrations *Migrations) (*Database, error) {
-	conn, err := sql.Open(driver, dsn)
+func New(dsn string, migrations *Migrations) (*Database, error) {
+	conn, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Database{
-		driver:         driver,
 		conn:           conn,
 		migrationTable: "migrations",
 		migrations:     migrations,
@@ -212,25 +212,13 @@ func (db *Database) getMigrationIndex(ctx context.Context, tx *sql.Tx) ([]uint, 
 }
 
 func (db *Database) insertMigration(ctx context.Context, tx *sql.Tx, version uint, description string) error {
-	var query string
-	switch db.driver {
-	case "postgres":
-		query = fmt.Sprintf("INSERT INTO %s (version, description) VALUES ($1, $2);", db.migrationTable)
-	default:
-		query = fmt.Sprintf("INSERT INTO %s (version, description) VALUES (?, ?);", db.migrationTable)
-	}
+	query := fmt.Sprintf("INSERT INTO %s (version, description) VALUES (?, ?);", db.migrationTable)
 	_, err := tx.ExecContext(ctx, query, version, description)
 	return err
 }
 
 func (db *Database) deleteMigration(ctx context.Context, tx *sql.Tx, version uint) error {
-	var query string
-	switch db.driver {
-	case "postgres":
-		query = fmt.Sprintf("DELETE FROM %s WHERE version = $1;", db.migrationTable)
-	default:
-		query = fmt.Sprintf("DELETE FROM %s WHERE version = ?;", db.migrationTable)
-	}
+	query := fmt.Sprintf("DELETE FROM %s WHERE version = ?;", db.migrationTable)
 	_, err := tx.ExecContext(ctx, query, version)
 	return err
 }
